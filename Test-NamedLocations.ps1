@@ -50,25 +50,26 @@ function Expand-CIDR {
         
     $cidrsplit = $CIDR -split '/'
     $base = ConvertTo-IPv4Object $cidrsplit[0]
-    $basebin = ([System.Convert]::ToString($base.Address, 2)).PadLeft(32, '0')
-    $check = $basebin.LastIndexOf('1')
-    if ($check -ge $cidrsplit[1]) {
+    $mask = [system.math]::Pow(2,32 - $cidrsplit[1]) - 1
+    $tops = [system.net.ipaddress][int32]($base.Address -bor $mask)
+    if ([int32]($base.Address -band $mask) -ge 0) {
         switch ($OverridePreference) {
             "Base" {
-                $basebin = $basebin.SubString(0, $cidrsplit[1]).PadRight(32, '0')
-                $base = [System.Net.IPAddress]([System.Convert]::ToInt32($basebin, 2))
+                $base = [system.net.ipaddress][int32]($tops.Address -bxor $mask)
                 $cidrsplit[0] = ConvertTo-IPv4String $base
                 Write-Warning "CIDR mask is longer than possible with the base address.`nModifying the request to $($cidrsplit -join '/')."
                 Write-Verbose "If you want to override mask instead (to limit the return to maximum possible with the given base address), run the command with '-OverridePreference Mask'"
             }
             "Mask" {
-                $cidrsplit[1] = $check + 1
-                Write-Warning "CIDR mask is longer than possible with the base address.`nModifying the request to $($cidrsplit -join '/')."
-                Write-Verbose "If you want to override base address instead (to include all addresses while keeping the mask), run the command with '-OverridePreference Base'"
+                $zeroes = [int]([math]::Floor([math]::log($base.Address -bxor ($base.Address - 1),2)))
+                $cidrsplit[1] = 32 - $zeroes
+                $mask = [system.math]::Pow(2,32 - $cidrsplit[1]) - 1
+                $tops = [system.net.ipaddress][int32]($base.Address -bor $mask)
+                            Write-Warning "CIDR mask is longer than possible with the base address.`nModifying the request to $($cidrsplit -join '/')."
+                Write-Verbose "If you want to override base address instead (to include all addresses while keeping the mask), run the command with '-OverridePreference Base' (default)"
             }
         }
     }
-    $tops = [System.Net.IPAddress]([System.Convert]::ToInt32($basebin.PadLeft(32, '0').SubString(0, $cidrsplit[1]).PadRight(32, '1'), 2))
 
     if ($AsArray.IsPresent) {
         $out = @()
@@ -186,4 +187,3 @@ function Get-IPNamedLocationsActivity {
     Write-Progress -Id 1 -Activity "Retrieving Named Locations" -Status "Done" -PercentComplete 100 -Completed
     return $out
 }
-
