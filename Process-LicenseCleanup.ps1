@@ -161,7 +161,7 @@ catch {
 }
 
 foreach ($UserId in $UserIdList) {
-    Remove-UserLicensesv -UserId $UserId
+    Remove-UserLicenses -UserId $UserId
 }
 
 Write-Log "Completed the run"
