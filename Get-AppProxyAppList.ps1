@@ -12,7 +12,7 @@
 
 [CmdletBinding()]
 param (
-    [Parameter(Mandatory = $true)][String]$TenantId,  # Can be GUID or .onmicrosoft.com domain name
+    [Parameter(Mandatory = $true)][String]$TenantId, # Can be GUID or .onmicrosoft.com domain name
     [Parameter(Mandatory = $true)][String]$Server     # Can be on-prem server name or connector object GUID
 )
 
@@ -72,15 +72,57 @@ Write-Host ""
     > Get-MgApplication -Property id, AppId, DisplayName, onPremisesPublishing -ExpandProperty connectorGroup -Filter "connectorGroup/id eq '$ConnectorObject.MemberOf.Id'"
     Get-MgApplication_List: $select across multiple workloads along with $expand acoss multiple workloads isn't supported yet.
 #>
-$ConnectorGroup.Applications = Get-MgApplication -Property id, AppId, DisplayName, onPremisesPublishing -Filter "onPremisesPublishing/singleSignOnSettings/singleSignOnMode eq 'onPremisesKerberos'" | 
-    Where-Object { $_.Id -in $ConnectorGroup.Applications.Id }
+$ConnectorGroup.Applications = Get-MgApplication -Property id, AppId, DisplayName, onPremisesPublishing -Filter "onPremisesPublishing/singleSignOnSettings/singleSignOnMode eq 'onPremisesKerberos'" -All | 
+Where-Object { $_.Id -in $ConnectorGroup.Applications.Id }
 $outApplications = $ConnectorGroup.Applications | Select-Object AppId, DisplayName, `
-    @{l='InternalUrl';e={$_.OnPremisesPublishing.InternalUrl}}, `
-    @{l='KerberosServicePrincipalName';e={$_.OnPremisesPublishing.SingleSignOnSettings.KerberosSignOnSettings.KerberosServicePrincipalName}}
+    @{l = 'InternalUrl'; e = { $_.OnPremisesPublishing.InternalUrl } }, `
+    @{l = 'KerberosServicePrincipalName'; e = { $_.OnPremisesPublishing.SingleSignOnSettings.KerberosSignOnSettings.KerberosServicePrincipalName } }
 
 # Format output and export to file
 Write-Host "Connector group has $($ConnectorGroup.Applications.Count) applications published with Kerberos authentication:"
-$outApplications | Format-Table -AutoSize
-$Path = ".\$(($ConnectorGroup.Id -split '-')[0])_$(Get-Date -Format 'yyyyMMdd').csv"
+$Path = ".\$(($ConnectorGroup.Id -split '-')[0])_$(Get-Date -Format 'yyyyMMdd')_applist.csv"
 Write-Host "Exporting Kerberos settings to $Path"
 $outApplications | Export-Csv -Path $Path -NoTypeInformation
+
+
+# Source / credit:
+# https://social.technet.microsoft.com/wiki/contents/articles/18996.active-directory-powershell-script-to-list-all-spns-used.aspx
+# You can use the block below as separate script and populate this with the SPNs found in output from the exported file above
+# This will list all objects that have the SPN configured, and their type (user, group, computer, etc.)
+$spnlist = $outApplications.KerberosServicePrincipalName | Select-Object -Unique
+$OutList = @()
+try {
+    $ForestObject = [System.DirectoryServices.ActiveDirectory.Forest]::GetCurrentForest()
+    $SearcherObject = $ForestObject.FindGlobalCatalog().GetDirectorySearcher()
+}
+# catch ActiveDirectoryOperationException
+catch [System.DirectoryServices.ActiveDirectory.ActiveDirectoryOperationException] {
+    Write-Host -ForegroundColor Red "Error connecting to Active Directory: `n$($_.Exception.Message)"
+    exit 500
+}
+if ($spnlist.Count -eq 0) {
+    Write-Host "No SPNs found in the list, terminating"
+    exit 0
+}
+foreach ($spn in $spnlist) {
+    $SearcherObject.filter = "(servicePrincipalName=$spn)"
+    $SearchResult = $SearcherObject.Findall()
+    Write-Host "Found $($SearchResult.count) principal(s) with SPN '$spn': $($SearchResult.Properties.name -join ',')"
+    foreach ($obj in $SearchResult) {
+        $OutList += $obj | Select-Object `
+            @{l = 'SPN'; e = { $spn } }, `
+            @{l = 'Type'; e = { $_.Properties.objectcategory -replace '^CN=([a-zA-Z\-]+),.*$', '$1' } }, `
+            @{l = "Name"; e = { $_.Properties.name } }, `
+            @{l = "DistinguishedName"; e = { $_.Properties.distinguishedname } }
+    }
+    Remove-Variable SearchResult
+}
+$SearcherObject.Dispose()
+if ($OutList.Count -gt 0) {
+    $Path = ".\$(($ConnectorGroup.Id -split '-')[0])_$(Get-Date -Format 'yyyyMMdd')_ownlist.csv"
+    Write-Host "Exporting SPN owners to $Path"
+    $OutList | Export-Csv -Path $Path -NoTypeInformation
+}
+else {
+    Write-Host "No SPN owners found"
+}
