@@ -58,7 +58,7 @@ function Write-Log {
 # Initialize the log file (if you need path checking, implement it here)
 try {
     Start-Log -FilePath "$($LogPath.Trim('\'))\UpnRestore_$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
-    Write-Log "Starting license cleanup run"
+    Write-Log "Starting UPN cleanup run"
 }
 catch {
     Write-Host -ForegroundColor Red "Couldn't initialize the log file, terminating"
