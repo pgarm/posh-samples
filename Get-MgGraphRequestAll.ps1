@@ -10,7 +10,7 @@ function Get-MgGraphRequestAll {
 
     do {
         if ($req.'@odata.nextLink') { $uri = $req.'@odata.nextLink' }
-        $req = Invoke-MgGraphRequest -Method GET -Uri $uri -OutputType PSObject
+        $req = Invoke-MgGraphRequest -Method $Method -Uri $uri -OutputType PSObject
         [array]$out.value += $req.value
     } while ($req.'@odata.nextLink')
 
