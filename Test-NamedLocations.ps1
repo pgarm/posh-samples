@@ -15,6 +15,39 @@
 # Partially inspired by works of David Kittell (https://www.kittell.net/code/powershell-ipv4-range/) and Dr. Tobias Weltner, MVP PowerShell. No actuall code was reused.
 #################################################################################
 
+function Expand-ObjectProperties {
+    param
+    (
+        [Parameter(
+            Mandatory = $true, 
+            ValueFromPipeline = $true,
+            ValueFromPipelineByPropertyName = $true
+        )][psobject]$InputObject
+        , [Parameter(
+            ValueFromPipelineByPropertyName = $true
+        )][string[]]$Properties
+        , [Parameter(
+            ValueFromPipelineByPropertyName = $true
+        )][string]$ExpandProperty
+    )
+    process {
+        foreach ($item in $InputObject) {
+            foreach ($prop in ($item | Select-Object -ExpandProperty $ExpandProperty)) {
+                if ($prop -is [PSCustomObject]) {
+                    $work = $item | Select-Object $Properties
+                    foreach ($subprop in $prop.psobject.properties) {
+                        $work | Add-Member -MemberType NoteProperty -Name $subprop.Name -Value $subprop.Value
+                    }
+                    $work
+                }
+                else {
+                    $item | Select-Object $Properties | Select-Object *, @{Name = "$ExpandProperty"; Expression = { $prop } }
+                }
+            }
+        }
+    }
+}
+    
 function ConvertTo-IPv4Object {
     param (
         [Parameter(Mandatory = $true)]
@@ -35,40 +68,26 @@ function ConvertTo-IPv4String {
     $Address.GetAddressBytes()[-1..-4] -join '.'
 }
 
-function Expand-CIDR {
+function Expand-CIDRv4 {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $true)]
         [ValidatePattern(
             '^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])(\/(3[0-2]|[1-2][0-9]|[0-9]))$',
-            ErrorMessage = "'{0}' is not a valid CIDR notation")
+            ErrorMessage = "'{0}' is not a valid IPv4 CIDR notation")
         ][String]$CIDR,
         [Switch]$AsArray,
-        [Switch]$AsObject,
-        [ValidateSet("Base", "Mask")][String]$OverridePreference = "Base"
+        [Switch]$AsObject
     )
         
     $cidrsplit = $CIDR -split '/'
     $base = ConvertTo-IPv4Object $cidrsplit[0]
-    $mask = [system.math]::Pow(2,32 - $cidrsplit[1]) - 1
-    $tops = [system.net.ipaddress][int32]($base.Address -bor $mask)
-    if ([int32]($base.Address -band $mask) -ge 0) {
-        switch ($OverridePreference) {
-            "Base" {
-                $base = [system.net.ipaddress][int32]($tops.Address -bxor $mask)
-                $cidrsplit[0] = ConvertTo-IPv4String $base
-                Write-Warning "CIDR mask is longer than possible with the base address.`nModifying the request to $($cidrsplit -join '/')."
-                Write-Verbose "If you want to override mask instead (to limit the return to maximum possible with the given base address), run the command with '-OverridePreference Mask'"
-            }
-            "Mask" {
-                $zeroes = [int]([math]::Floor([math]::log($base.Address -bxor ($base.Address - 1),2)))
-                $cidrsplit[1] = 32 - $zeroes
-                $mask = [system.math]::Pow(2,32 - $cidrsplit[1]) - 1
-                $tops = [system.net.ipaddress][int32]($base.Address -bor $mask)
-                            Write-Warning "CIDR mask is longer than possible with the base address.`nModifying the request to $($cidrsplit -join '/')."
-                Write-Verbose "If you want to override base address instead (to include all addresses while keeping the mask), run the command with '-OverridePreference Base' (default)"
-            }
-        }
+    $mask = [system.math]::Pow(2, 32 - $cidrsplit[1]) - 1
+    $tops = [system.net.ipaddress][uint32]($base.Address -bor $mask)
+    if ([uint32]($base.Address -band $mask) -ge 0) {
+        $base = [system.net.ipaddress][uint32]($tops.Address -bxor $mask)
+        $cidrsplit[0] = ConvertTo-IPv4String $base
+        Write-Warning "CIDR mask is longer than possible with the base address.`nModifying the request to $($cidrsplit -join '/')."
     }
 
     if ($AsArray.IsPresent) {
@@ -85,17 +104,85 @@ function Expand-CIDR {
     else {
         if ($AsObject.IsPresent) {
             $out = [PSCustomObject]@{
-                First = [System.Net.IPAddress]$base
-                Last  = [System.Net.IPAddress]$tops
+                Range          = $CIDR
+                EffectiveRange = $cidrsplit -join '/'
+                First          = [System.Net.IPAddress]$base
+                Last           = [System.Net.IPAddress]$tops
             }
         }
         else {
             $out = [PSCustomObject]@{
-                First = ConvertTo-IPv4String $base
-                Last  = ConvertTo-IPv4String $tops
+                Range          = $CIDR
+                EffectiveRange = $cidrsplit -join '/'
+                First          = ConvertTo-IPv4String $base
+                Last           = ConvertTo-IPv4String $tops
             }
         }
     }
+    return $out
+}
+
+# Function to expand IPv6 CIDR notation
+function Expand-CIDRv6 {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [Validatescript(
+            {
+                $cidrsplit = $_ -split '/'
+                if ($cidrsplit[1] -notin 0..128) {
+                    throw "CIDR mask must be between 0 and 128 bits."
+                }
+                $base = [System.Net.IPAddress]::Parse($cidrsplit[0])
+                return $true
+            }
+            ,
+            ErrorMessage = "'{0}' is not a valid IPv6 CIDR notation"
+        )][String]$CIDR,
+        #        [Switch]$AsArray,
+        [Switch]$AsObject
+    )
+        
+    $cidrsplit = $CIDR -split '/'
+    $init = [bigint]::Parse(([System.BitConverter]::ToString(([System.Net.IPAddress]::Parse($cidrsplit[0])).GetAddressBytes()) -replace '-', '').PadLeft(33, '0'), [System.Globalization.NumberStyles]::HexNumber)
+    $base = $init -shr (128 - $cidrsplit[1]) -shl (128 - $cidrsplit[1])
+    $tops = $init -bor ([bigint]::Parse('0FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF', [System.Globalization.NumberStyles]::HexNumber) -shr ($cidrsplit[1]))
+    $cidrsplit[0] = ([IPAddress]($base.ToString('X').TrimStart('0').PadLeft(32, '0') -replace '....(?!$)', '$0:')).IPAddressToString
+
+    if ($base -ne $init) {
+        Write-Warning "CIDR mask is longer than possible with the base address.`nModifying the request to $($cidrsplit -join '/')."
+    }
+
+    <#
+    if ($AsArray.IsPresent) {
+        $out = @()
+        $base.Address..$tops.Address | ForEach-Object {
+            if ($AsObject.IsPresent) {
+                $out += [System.Net.IPAddress]$_    
+            }
+            else {
+                $out += ConvertTo-IPv4String $_
+            }
+        }
+    }
+    else {#>
+    if ($AsObject.IsPresent) {
+        $out = [PSCustomObject]@{
+            Range          = $CIDR
+            EffectiveRange = $cidrsplit -join '/'
+            First          = ([IPAddress]($base.ToString('X').TrimStart('0').PadLeft(32, '0') -replace '....(?!$)', '$0:'))
+            Last           = ([IPAddress]($tops.ToString('X').TrimStart('0').PadLeft(32, '0') -replace '....(?!$)', '$0:'))
+        }
+    }
+    else {
+        $out = [PSCustomObject]@{
+            Range          = $CIDR
+            EffectiveRange = $cidrsplit -join '/'
+            First          = ([IPAddress]($base.ToString('X').TrimStart('0').PadLeft(32, '0') -replace '....(?!$)', '$0:')).IPAddressToString
+            Last           = ([IPAddress]($tops.ToString('X').TrimStart('0').PadLeft(32, '0') -replace '....(?!$)', '$0:')).IPAddressToString
+        }
+    }
+    #}
     return $out
 }
 
@@ -110,7 +197,7 @@ function Get-SignInActivityByCIDRv4 {
     
     $activity = @()
     $i = 0
-    $range = Expand-CIDR -CIDR $CIDR -AsArray
+    $range = Expand-CIDRv4 -CIDR $CIDR -AsArray
     foreach ($ipAddress in $range) {
         # As currently $count query parameter is not supported for /auditLogs/signIns, we can't reliably get sign-in count per IP.
         # Also, as the cap for any query result is 1000 sign-ins, we can't retrieve them all and count locally (it's also resource- and latency-prohibiting)
@@ -125,20 +212,22 @@ function Get-SignInActivityByCIDRv4 {
 
     $metrics = $activity | Measure-Object -Sum -Property Active
     $rangeresult = [PSCustomObject]@{
-        Range       = $CIDR
-        Active      = [int]($metrics.Sum)
-        Total       = [int]($metrics.Count)
+        Range          = $CIDR
+        EffectiveRange = $range.EffectiveRange
+        Active         = [int]($metrics.Sum)
+        Total          = [int]($metrics.Count)
         # Percentage = [int]($metrics.Sum * 100 / $metrics.Count)
-        IPAddresses = $activity
+        IPAddresses    = $activity
     }
 
     Write-Progress -Id 3 -ParentId 2 -Activity "Retrieving Sign-in activity by IP" -Status "Done" -PercentComplete 100 -Completed
     return $rangeresult
 }
 
-function Get-SignInActivityByNamedLocation {
+function Get-NamedLocationDetails {
     param (
-        [String]$LocationId
+        [String]$LocationId,
+        [bool]$Activity = $false
     )
     $ranges = @()
     $Location = Get-MgIdentityConditionalAccessNamedLocation -NamedLocationId $LocationId
@@ -147,10 +236,22 @@ function Get-SignInActivityByNamedLocation {
         switch ($range['@odata.type']) {
             '#microsoft.graph.iPv4CidrRange' { 
                 Write-Progress -Id 2 -ParentId 1 -Activity "Retrieving sign-in activity by CIDR range" -Status "$($r+1)/$(($Location.AdditionalProperties['ipRanges']).Count): $($range['cidrAddress'])" -PercentComplete ($r * 100 / ($Location.AdditionalProperties['ipRanges']).Count)
-                $ranges += Get-SignInActivityByCIDRv4 -CIDR $range['cidrAddress']
+                if ($Activity) {
+                    $ranges += Get-SignInActivityByCIDRv4 -CIDR $range['cidrAddress']
+                }
+                else {
+                    $ranges += Expand-CIDRv4 -CIDR $range['cidrAddress']
+                }
             }
             '#microsoft.graph.iPv6CidrRange' {
-                Write-Warning "Skipping $($range['cidrAddress']), as IPv6 is not yet fully supported in AAD, as there are no public endpoints."
+                Write-Progress -Id 2 -ParentId 1 -Activity "Retrieving sign-in activity by CIDR range" -Status "$($r+1)/$(($Location.AdditionalProperties['ipRanges']).Count): $($range['cidrAddress'])" -PercentComplete ($r * 100 / ($Location.AdditionalProperties['ipRanges']).Count)
+                if ($Activity) {
+                    # $ranges += Get-SignInActivityByCIDRv6 -CIDR $range['cidrAddress']
+                    Write-Warning "Skipping $($range['cidrAddress']), as IPv6 parsing for sign-ins via API is very inefficient."
+                }
+                else {
+                    $ranges += Expand-CIDRv6 -CIDR $range['cidrAddress']
+                }
             }
         }        
         $r++
@@ -160,20 +261,24 @@ function Get-SignInActivityByNamedLocation {
     $LocationResult = [PSCustomObject]@{
         DisplayName = $Location.DisplayName
         Id          = $location.Id
-        Active      = [bool]($metrics.Sum)
         CIDRs       = $ranges
+    }
+    if ($Activity) {
+        $LocationResult | Add-Member -MemberType NoteProperty -Name Active -Value [bool]($metrics.Sum)
     }
 
     Write-Progress -Id 2 -ParentId 1 -Activity "Retrieving sign-in activity by CIDR range" -Status "Done" -PercentComplete 100 -Completed
     return $LocationResult
 }
 
-function Get-IPNamedLocationsActivity {
+function Get-IPNamedLocations {
     param (
-        [String]$TenantId
+        [String]$TenantId,
+        [bool]$Activity = $false,
+        [switch]$AsTable
     )
     
-    Connect-MgGraph -Scopes AuditLog.Read.All, Policy.Read.All -TenantId $TenantId | Out-Null
+    Connect-MgGraph -Scopes AuditLog.Read.All, Policy.Read.All -TenantId $TenantId -ContextScope Process | Out-Null
 
     [Array]$Locations = Get-MgIdentityConditionalAccessNamedLocation -Filter "isof('microsoft.graph.ipNamedLocation')" -All
     $out = @()
@@ -181,9 +286,15 @@ function Get-IPNamedLocationsActivity {
 
     foreach ($loc in $Locations) {
         Write-Progress -Id 1 -Activity "Retrieving Named Locations" -Status "$($l+1)/$($Locations.Count): $($loc.DisplayName) ($($loc.Id))" -PercentComplete ($l * 100 / $Locations.Count)
-        $out += Get-SignInActivityByNamedLocation -Location $loc.Id
+        $out += Get-NamedLocationDetails -Location $loc.Id -Activity:$Activity
         $l++
     }
     Write-Progress -Id 1 -Activity "Retrieving Named Locations" -Status "Done" -PercentComplete 100 -Completed
-    return $out
+    
+    if ($AsTable.IsPresent) {
+        $out | Expand-ObjectProperties -Properties DisplayName,Id -ExpandProperty CIDRs
+    }
+    else {
+        return $out
+    }
 }
