@@ -100,7 +100,7 @@ foreach ($sp in $serviceprincipals) {
         foreach ($perm in $ManifestPermissions) {
             # Add-Member -InputObject $perm -NotePropertyName ResourceDisplayName -NotePropertyValue ($ApiObjects.Values | Where-Object { $_.AppId -eq $perm.ResourceAppId }).DisplayName
             switch ($perm.Type) {
-                'Scope' { Add-Member -InputObject $perm -NotePropertyName PermissionName -NotePropertyValue ($ApiObjects.Values.Oauth2PermissionScopes | Where-Object { $_.Id -eq $perm.Id }).Value }
+                'Scope' { Add-Member -InputObject $perm -NotePropertyName PermissionName -NotePropertyValue ($ApiObjects.Values.PublishedPermissionScopes | Where-Object { $_.Id -eq $perm.Id }).Value }
                 'Role' { Add-Member -InputObject $perm -NotePropertyName PermissionName -NotePropertyValue ($ApiObjects.Values.AppRoles | Where-Object { $_.Id -eq $perm.Id }).Value }
             }
         }
