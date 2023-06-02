@@ -6,7 +6,7 @@
 
 [CmdletBinding()]
 param (
-    [string]$TenantId = 'pgarmcdx.onmicrosoft.com' # Tenant ID as GUID or starter domain name
+    [string]$TenantId # Tenant ID as GUID or starter domain name
 )
 
 #Helper function to expand nested objects
