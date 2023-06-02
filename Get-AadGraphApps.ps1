@@ -6,7 +6,7 @@
 
 [CmdletBinding()]
 param (
-    [string]$TenantId # Tenant ID as GUID or starter domain name
+    [string]$TenantId = 'pgarmcdx.onmicrosoft.com' # Tenant ID as GUID or starter domain name
 )
 
 #Helper function to expand nested objects
@@ -68,7 +68,7 @@ $ApiObjects = @{
 
 # The following two calls are long-running on large tenants
 # Get list of all App Registrations in the tenant that have AAD Graph permissions (can't filter on the OData query efficiently)
-$Applications = Get-MgApplication -All -Property Id, DisplayName,AppId,RequiredResourceAccess,OnPremisesPublishing | Where-Object { $_.RequiredResourceAccess.ResourceAppId -contains $APIobjects.AadGraph.AppId } | Select-Object Id, DisplayName, AppId, RequiredResourceAccess
+$Applications = Get-MgApplication -All -Property Id, DisplayName,AppId,RequiredResourceAccess | Where-Object { $_.RequiredResourceAccess.ResourceAppId -contains $APIobjects.AadGraph.AppId } | Select-Object Id, DisplayName, AppId, RequiredResourceAccess
 # Get the list of all the service principals (as we can't pull permissions from graph directly in one call)
 $ServicePrincipals = Get-MgServicePrincipal -All
 
@@ -108,7 +108,7 @@ foreach ($sp in $serviceprincipals) {
         $obj.RequestedAadScopes = ($ManifestPermissions | Where-Object { $_.ResourceAppId -eq $ApiObjects.AadGraph.AppId -and $_.Type -eq 'Scope' } | Select-Object -ExpandProperty PermissionName -Unique) -join ','
         $obj.RequestedMsgRoles = ($ManifestPermissions | Where-Object { $_.ResourceAppId -eq $ApiObjects.MsGraph.AppId -and $_.Type -eq 'Role' } | Select-Object -ExpandProperty PermissionName -Unique) -join ','
         $obj.RequestedMsgScopes = ($ManifestPermissions | Where-Object { $_.ResourceAppId -eq $ApiObjects.MsGraph.AppId -and $_.Type -eq 'Scope' } | Select-Object -ExpandProperty PermissionName -Unique) -join ','
-        $obj.AppProxy = ($applications | Where-Object { $_.AppId -eq $sp.AppId }).OnPremisesPublishing.ExternalUrl
+        $obj.AppProxy = (Get-MgApplication -ApplicationId ($Applications | Where-Object {$_.AppId -eq $sp.AppId}).Id -Property OnPremisesPublishing).OnPremisesPublishing.ExternalUrl
         Remove-Variable ManifestPermissions -ErrorAction SilentlyContinue
     }
     else {
@@ -125,7 +125,6 @@ foreach ($sp in $serviceprincipals) {
         Where-Object { $_.ResourceId -in $ApiObjects.Values.Id } | 
         Select-Object ResourceId, Scope
     if ($DelegatedPermissions) {
-        Write-Host $DelegatedPermissions
         if ($DelegatedPermissions.ResourceId -contains $ApiObjects.AadGraph.Id) {
             $obj.DelegatedAadScopes = (($DelegatedPermissions | Where-Object { $_.ResourceId -eq $ApiObjects.AadGraph.Id }).Scope.Split(' ') | Where-Object { $_ -notin $trash } | Select-Object -Unique) -join ','
         }
@@ -175,7 +174,7 @@ foreach ($sp in $serviceprincipals) {
     }
     Remove-Variable ApplicationPermissions -ErrorAction SilentlyContinue
     if ($obj.ApplicationAadRoles -or $obj.DelegatedAadScopes -or $obj.RequestedAadRoles -or $obj.RequestedAadScopes) {
-        $Output += [PsCustomObject]$obj | Select-Object DisplayName,ServicePrincipalId,AppId,Owner,AppRegistration,`
+        $Output += [PsCustomObject]$obj | Select-Object DisplayName,ServicePrincipalId,AppId,Owner,AppRegistration,AppProxy,`
             RequestedAadRoles,ApplicationAadRoles,RequestedAadScopes,DelegatedAadScopes,`
             RequestedMsgRoles,ApplicationMsgRoles,RequestedMsgScopes,DelegatedMsgScopes
     }
