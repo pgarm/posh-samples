@@ -6,7 +6,7 @@
 
 [CmdletBinding()]
 param (
-    [string]$TenantId = 'pgarmcdx.onmicrosoft.com' # Tenant ID as GUID or starter domain name
+    [string]$TenantId # Tenant ID as GUID or starter domain name
 )
 
 #Helper function to expand nested objects
@@ -108,7 +108,10 @@ foreach ($sp in $serviceprincipals) {
         $obj.RequestedAadScopes = ($ManifestPermissions | Where-Object { $_.ResourceAppId -eq $ApiObjects.AadGraph.AppId -and $_.Type -eq 'Scope' } | Select-Object -ExpandProperty PermissionName -Unique) -join ','
         $obj.RequestedMsgRoles = ($ManifestPermissions | Where-Object { $_.ResourceAppId -eq $ApiObjects.MsGraph.AppId -and $_.Type -eq 'Role' } | Select-Object -ExpandProperty PermissionName -Unique) -join ','
         $obj.RequestedMsgScopes = ($ManifestPermissions | Where-Object { $_.ResourceAppId -eq $ApiObjects.MsGraph.AppId -and $_.Type -eq 'Scope' } | Select-Object -ExpandProperty PermissionName -Unique) -join ','
-        $obj.AppProxy = (Get-MgApplication -ApplicationId ($Applications | Where-Object {$_.AppId -eq $sp.AppId}).Id -Property OnPremisesPublishing).OnPremisesPublishing.ExternalUrl
+        try {
+            $obj.AppProxy = (Get-MgApplication -ApplicationId ($Applications | Where-Object {$_.AppId -eq $sp.AppId}).Id -Property OnPremisesPublishing).OnPremisesPublishing.ExternalUrl
+        }
+        catch { $obj.AppProxy = '' }
         Remove-Variable ManifestPermissions -ErrorAction SilentlyContinue
     }
     else {
@@ -117,7 +120,7 @@ foreach ($sp in $serviceprincipals) {
         $obj.RequestedAadScopes = ''
         $obj.RequestedMsgRoles = ''
         $obj.RequestedMsgScopes = ''
-        $obj.AppProxy = $false
+        $obj.AppProxy = ''
     }
 
     # Get the list of delegated permissions granted to the SP
@@ -180,4 +183,10 @@ foreach ($sp in $serviceprincipals) {
     }
 }
 
-$Output | Export-Csv -Path ".\AADGraphPermissions.csv" -NoTypeInformation
+try {
+    $Output | Export-Csv -Path ".\AADGraphPermissions.csv" -NoTypeInformation
+    Write-Host "Exported the CSV to .\AADGraphPermissions.csv"
+}
+catch {
+    Write-Host "Failed to export file"
+}
