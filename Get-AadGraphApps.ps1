@@ -6,7 +6,8 @@
 
 [CmdletBinding()]
 param (
-    [string]$TenantId # Tenant ID as GUID or starter domain name
+    [Parameter(Mandatory=$true)][string]$TenantId, # Tenant ID as GUID or starter domain name
+    [string[]]$InHouse = @() # Add your own tenant IDs here if you use additional tenants to host application objects
 )
 
 #Helper function to expand nested objects
@@ -47,10 +48,6 @@ function Expand-ObjectProperties {
 $firstparty = @(
     'f8cdef31-a31e-4b4a-93e4-5f571e91255a',
     '72f988bf-86f1-41af-91ab-2d7cd011db47'
-)
-
-$inhouse = @( # Add your own tenant IDs here if you use additional tenants to host application objects
-
 )
 
 $trash = @('openid', 'profile', 'offline_access', '') # List of permissions to ignore
