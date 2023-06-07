@@ -100,7 +100,7 @@ if ($Subscriptions.Count -gt 0) {
         }
     }
     try {
-        $DiagnosticSettings = ((Invoke-WebRequest @AzSplat).Content | ConvertFrom-Json -Depth 10).Value | Where-Object { $_.properties.workspaceId }
+        $DiagnosticSettings = ((Invoke-WebRequest @AzSplat).Content | ConvertFrom-Json -Depth 10).value | Where-Object { $_.properties.workspaceId }
     }
     catch {
         Write-Warning "Unable to retrieve diagnostic settings from tenant. Activity logs will not be retrieved."
@@ -112,8 +112,8 @@ if ($Subscriptions.Count -gt 0) {
             Write-Progress -Activity "Retrieving Log Analytics data" -Status "Trying workspace $($parse[-1]) in subscription $($parse[2])" -PercentComplete 0 -Id 2 -ParentId 1
             Set-AzContext -SubscriptionId $parse[2] | Out-Null
             try {
-                $WorkspaceId = (Get-AzOperationalInsightsWorkspace -Name $parse[-1] -ResourceGroupName $parse[4] -ErrorAction SilentlyContinue).CustomerId
-                $ActivityLogs = (Invoke-AzOperationalInsightsQuery -Workspace $WorkspaceId -Query $Query).Results
+                $WorkspaceId = (Get-AzOperationalInsightsWorkspace -Name $parse[-1] -ResourceGroupName $parse[4] -ErrorAction SilentlyContinue).CustomerId.Guid
+                $ActivityLogs = (Invoke-AzOperationalInsightsQuery -WorkspaceId $WorkspaceId -Query $Query).Results
                 if ($ActivityLogs) {
                     Write-Verbose "Successfully retrieved data from Log Analytics workspace $($parse[-1]) in subscription $($parse[2])."
                     break
@@ -143,14 +143,14 @@ $ApiObjects = @{
 # The following two calls are long-running on large tenants
 # Get list of all App Registrations in the tenant that have AAD Graph permissions (can't filter on the OData query efficiently)
 Write-Progress -Activity "Initializing" -Status "Getting App Registrations" -PercentComplete 0 -Id 1
-$Applications = Get-MgApplication -All -Property Id, DisplayName, AppId, RequiredResourceAccess | Where-Object { $_.RequiredResourceAccess.ResourceAppId -contains $APIobjects.AadGraph.AppId } | Select-Object Id, DisplayName, AppId, RequiredResourceAccess
+$Applications = Get-MgApplication -All -Property Id, DisplayName, AppId, RequiredResourceAccess | Select-Object Id, DisplayName, AppId, RequiredResourceAccess
 # Get the list of all the service principals (as we can't pull permissions from graph directly in one call)
 Write-Progress -Activity "Initializing" -Status "Getting Service Principals" -PercentComplete 0 -Id 1
 $ServicePrincipals = Get-MgServicePrincipal -All
 
 $Output = @(); $i = 0; $StartTime = Get-Date
 
-foreach ($ActiveApp in ($ActivityLogs | Where-Object { $_.AppId -notin $ServicePrincipals.AppId})) {
+foreach ($ActiveApp in ($ActivityLogs | Where-Object { $_.AppId -notin $ServicePrincipals.AppId })) {
     $Output += [PsCustomObject]@{
         DisplayName         = $ActiveApp.AppDisplayName
         ServicePrincipalId  = ''
@@ -207,10 +207,7 @@ foreach ($sp in $serviceprincipals) {
         $obj.RequestedAadScopes = ($ManifestPermissions | Where-Object { $_.ResourceAppId -eq $ApiObjects.AadGraph.AppId -and $_.Type -eq 'Scope' } | Select-Object -ExpandProperty PermissionName -Unique) -join ','
         $obj.RequestedMsgRoles = ($ManifestPermissions | Where-Object { $_.ResourceAppId -eq $ApiObjects.MsGraph.AppId -and $_.Type -eq 'Role' } | Select-Object -ExpandProperty PermissionName -Unique) -join ','
         $obj.RequestedMsgScopes = ($ManifestPermissions | Where-Object { $_.ResourceAppId -eq $ApiObjects.MsGraph.AppId -and $_.Type -eq 'Scope' } | Select-Object -ExpandProperty PermissionName -Unique) -join ','
-        try {
-            $obj.AppProxy = (Get-MgApplication -ApplicationId ($Applications | Where-Object { $_.AppId -eq $sp.AppId }).Id -Property OnPremisesPublishing).OnPremisesPublishing.ExternalUrl
-        }
-        catch { $obj.AppProxy = '' }
+        $obj.AppProxy = (Get-MgApplication -ApplicationId ($Applications | Where-Object { $_.AppId -eq $sp.AppId }).Id -Property Id, AppId, OnPremisesPublishing -ErrorAction SilentlyContinue).OnPremisesPublishing.ExternalUrl 
         Remove-Variable ManifestPermissions -ErrorAction SilentlyContinue
     }
     else {
@@ -287,7 +284,7 @@ foreach ($sp in $serviceprincipals) {
     }
 
     # Add the object to the output array if it has any permissions
-    if ($obj.ApplicationAadRoles -or $obj.DelegatedAadScopes -or $obj.RequestedAadRoles -or $obj.RequestedAadScopes) {
+    if ($obj.ApplicationAadRoles -or $obj.DelegatedAadScopes -or $obj.RequestedAadRoles -or $obj.RequestedAadScopes -or $obj.ActiveAadUsers -or $obj.TotalSignIns) {
         $Output += [PsCustomObject]$obj | Select-Object DisplayName, ServicePrincipalId, AppId, Owner, AppRegistration, AppProxy, `
             RequestedAadRoles, ApplicationAadRoles, RequestedAadScopes, DelegatedAadScopes, `
             RequestedMsgRoles, ApplicationMsgRoles, RequestedMsgScopes, DelegatedMsgScopes, `
@@ -303,4 +300,7 @@ catch {
     Write-Host "Failed to export file"
 }
 
-$VerbosePreference = $VerboseStashed
+if ($Verbose.IsPresent) {
+    $VerbosePreference = $VerboseStashed
+}
+Write-Host "Finished in $((Get-Date) - $StartTime)"
