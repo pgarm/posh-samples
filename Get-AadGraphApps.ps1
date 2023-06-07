@@ -7,8 +7,9 @@
 [CmdletBinding()]
 param (
     [Parameter(Mandatory = $true)][string]$TenantId, # Tenant ID as GUID or starter domain name
-    [string]$WorkspaceName, # Log Analytics Workspace name to retrieve activity logs from. If not specified, the script will not attempt to retrieve activity logs. You can get the workspace name from https://portal.azure.com/#view/Microsoft_AAD_IAM/ActiveDirectoryMenuBlade/~/DiagnosticSettings
-    [string]$SubscriptionId, # Subscription ID to use for Log Analytics workspace. If not specified, the script will use iterate through subscriptions available to the user and attempt to find the workspace.
+    #    [string]$WorkspaceName, # Log Analytics Workspace name to retrieve activity logs from. If not specified, the script will not attempt to retrieve activity logs. You can get the workspace name from https://portal.azure.com/#view/Microsoft_AAD_IAM/ActiveDirectoryMenuBlade/~/DiagnosticSettings
+    #    [string]$SubscriptionId, # Subscription ID to use for Log Analytics workspace. If not specified, the script will use iterate through subscriptions available to the user and attempt to find the workspace.
+    [string]$Period = '30d', # Period to retrieve activity logs for, in Kusto format. Default is 30 days.
     [string[]]$InHouse = @() # Add your own tenant IDs here if you use additional tenants to host application objects
 )
 
@@ -63,7 +64,7 @@ $trash = @('openid', 'profile', 'offline_access', '')
 # Define Log Analytics query to pull sign-in activity for apps
 $Query = @"
 SigninLogs
-| where TimeGenerated > ago (30d) and ResourceIdentity == '00000002-0000-0000-c000-000000000000'
+| where TimeGenerated > ago ($Period) and ResourceIdentity == '00000002-0000-0000-c000-000000000000'
 | summarize count() by AppDisplayName,AppId,UserId
 | summarize ActiveUsers = count(UserId), TotalSignIns = sum (count_) by AppDisplayName,AppId
 "@
@@ -71,14 +72,15 @@ SigninLogs
 # Connect to MGGraph with Application.Read.All, Directory.Read.All scope
 Connect-MgGraph -Scopes Application.Read.All, Directory.Read.All -ContextScope Process -TenantId $TenantId
 Select-MgProfile beta
-$inhouse += (Get-MgContext).TenantId # Add the current tenant ID to the list of tenants to consider in-house
+$MgContext = Get-MgContext
+$inhouse += $MgContext.TenantId # Add the current tenant ID to the list of tenants to consider in-house
 
-# Connect to AzAccount if a workspace name is specified and module is available, and get the workspace object if it exists
-if ($WorkspaceName -and (Get-Module -ListAvailable Az.Accounts).Count -gt 0) {
+# Connect to AzAccount if the Az module is available, and get the workspace object if it exists
+if ((Get-Module -ListAvailable Az.Accounts).Count -gt 0) {
     try {
         Write-Progress -Activity "Initializing" -Status "Connecting to Azure RM" -PercentComplete 0 -Id 1
-        Write-Verbose "Connecting to Azure RM $((Get-MgContext).Account) $((Get-MgContext).TenantId)"
-        Connect-AzAccount -AccountId (Get-MgContext).Account -TenantId $TenantId | Out-Null
+        Write-Verbose "Connecting to Azure RM $($MgContext.Account) $($MgContext.TenantId)"
+        Connect-AzAccount -AccountId $MgContext.Account -TenantId $MgContext.TenantId | Out-Null
         $Subscriptions = Get-AzSubscription
     }
     catch {
@@ -86,40 +88,50 @@ if ($WorkspaceName -and (Get-Module -ListAvailable Az.Accounts).Count -gt 0) {
     }
 }
 
-# Try to find the Log Analytics workspace in the subscription specified, or in any of the subscriptions available to the user
+# Try to find the Log Analytics workspace in tenant diagnostics configuration, and check if it's accessible to the user
 Write-Progress -Activity "Initializing" -Status "Retrieving Log Analytics workspace" -PercentComplete 0 -Id 1
-if ($SubscriptionId -in $Subscriptions.Id) {
-    Write-Progress -Activity "Retrieving Log Analytics configuration" -Status "Trying subscription $SubscriptionId" -PercentComplete 0 -Id 2 -ParentId 1
-    Set-AzContext -SubscriptionId $SubscriptionId | Out-Null
-    $Workspace = Get-AzOperationalInsightsWorkspace -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq $WorkspaceName }
-}
-if (!$Workspace) {
-    $s=0
-    foreach ($sub in $Subscriptions) {
-        Write-Progress -Activity "Retrieving Log Analytics configuration" -Status "Trying subscription $SubscriptionId" -PercentComplete (($s++)*100/$Subscriptions.Count) -Id 2 -ParentId 1
-        Set-AzContext -SubscriptionId $sub.Id | Out-Null
-        $Workspace = Get-AzOperationalInsightsWorkspace -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq $WorkspaceName }
-        if ($Workspace) {
-            Write-Verbose "Found workspace $($Workspace.Name) in subscription $($sub.Name)"
-            break
+if ($Subscriptions.Count -gt 0) {
+    Write-Progress -Activity "Retrieving Log Analytics configuration" -Status "Getting diagnostic settings from tenant" -PercentComplete 0 -Id 2 -ParentId 1
+    $AzSplat = @{
+        Uri     = 'https://management.azure.com/api/invoke'
+        Headers = @{
+            Authorization     = "Bearer $((Get-AzAccessToken).Token)"
+            'x-ms-path-query' = '/providers/microsoft.aadiam/diagnosticSettings?api-version=2017-04-01-preview'
         }
     }
-}
-Write-Progress -Activity "Retrieving Log Analytics configuration" -Completed -Id 2 -ParentId 1
-
-# If the workspace is found, try to retrieve the activity logs
-if ($Workspace) {
     try {
-        Write-Progress -Activity "Retrieving activity logs" -Status "Retrieving activity logs from LogAnalytics" -PercentComplete 0 -Id 3 -ParentId 1
-        $ActivityLogs = (Invoke-AzOperationalInsightsQuery -Workspace $Workspace -Query $Query).Results
+        $DiagnosticSettings = ((Invoke-WebRequest @AzSplat).Content | ConvertFrom-Json -Depth 10).value | Where-Object { $_.properties.workspaceId }
     }
     catch {
-        Write-Warning "Unable to retrieve activity logs from LogAnalytics. Activity logs will be omitted on the report."
+        Write-Warning "Unable to retrieve diagnostic settings from tenant. Activity logs will not be retrieved."
     }
-    Write-Progress -Activity "Retrieving activity logs" -Completed -Id 3 -ParentId 1
+
+    foreach ($diag in $DiagnosticSettings) {
+        $parse = $diag.properties.workspaceId.Split('/')
+        if ($parse[2] -in $Subscriptions.Id) {
+            Write-Progress -Activity "Retrieving Log Analytics data" -Status "Trying workspace $($parse[-1]) in subscription $($parse[2])" -PercentComplete 0 -Id 2 -ParentId 1
+            Set-AzContext -SubscriptionId $parse[2] | Out-Null
+            try {
+                $WorkspaceId = (Get-AzOperationalInsightsWorkspace -Name $parse[-1] -ResourceGroupName $parse[4] -ErrorAction SilentlyContinue).CustomerId.Guid
+                $ActivityLogs = (Invoke-AzOperationalInsightsQuery -WorkspaceId $WorkspaceId -Query $Query).Results
+                if ($ActivityLogs) {
+                    Write-Verbose "Successfully retrieved data from Log Analytics workspace $($parse[-1]) in subscription $($parse[2])."
+                    break
+                }
+            }
+            catch {
+                Write-Verbose "Unable to retrieve data from Log Analytics workspace $($parse[-1]) in subscription $($parse[2])."
+            }
+        }
+    }
+    if (!$ActivityLogs) {
+        Write-Warning "No Log Analytics workspaces that could serviec the request found. Activity logs will be omitted from the report."
+    }
+    Write-Progress -Activity "Retrieving activity logs" -Completed -Id 2 -ParentId 1
 }
 else {
-    Write-Warning "Unable to find workspace $WorkspaceName in any of the subscriptions in the tenant, or you don't have access to it. Activity logs will not be retrieved."
+    $ActivityLogs = $null
+    Write-Warning "No subscriptions available to the user. Activity logs will not be retrieved."
 }
 
 # Get the SP objects for AAD Graph amd Microsoft Graph from the tenant
@@ -131,38 +143,38 @@ $ApiObjects = @{
 # The following two calls are long-running on large tenants
 # Get list of all App Registrations in the tenant that have AAD Graph permissions (can't filter on the OData query efficiently)
 Write-Progress -Activity "Initializing" -Status "Getting App Registrations" -PercentComplete 0 -Id 1
-$Applications = Get-MgApplication -All -Property Id, DisplayName, AppId, RequiredResourceAccess | Where-Object { $_.RequiredResourceAccess.ResourceAppId -contains $APIobjects.AadGraph.AppId } | Select-Object Id, DisplayName, AppId, RequiredResourceAccess
+$Applications = Get-MgApplication -All -Property Id, DisplayName, AppId, RequiredResourceAccess | Select-Object Id, DisplayName, AppId, RequiredResourceAccess
 # Get the list of all the service principals (as we can't pull permissions from graph directly in one call)
 Write-Progress -Activity "Initializing" -Status "Getting Service Principals" -PercentComplete 0 -Id 1
 $ServicePrincipals = Get-MgServicePrincipal -All
 
 $Output = @(); $i = 0; $StartTime = Get-Date
 
-if ($ActivityLogs.AppId -contains '1b730954-1685-4b74-9bfd-dac224a7b894') {
+foreach ($ActiveApp in ($ActivityLogs | Where-Object { $_.AppId -notin $ServicePrincipals.AppId })) {
     $Output += [PsCustomObject]@{
-        DisplayName = 'Azure Active Directory PowerShell'
-        ServicePrincipalId = ''
-        AppId = '1b730954-1685-4b74-9bfd-dac224a7b894'
-        Owner = 'First-party'
-        AppRegistration = $false
-        AppProxy = ''
-        RequestedAadRoles = ''
+        DisplayName         = $ActiveApp.AppDisplayName
+        ServicePrincipalId  = ''
+        AppId               = $ActiveApp.AppId
+        Owner               = 'First-party'
+        AppRegistration     = $false
+        AppProxy            = ''
+        RequestedAadRoles   = ''
         ApplicationAadRoles = ''
-        RequestedAadScopes = ''
-        DelegatedAadScopes = ''
-        RequestedMsgRoles = ''
+        RequestedAadScopes  = ''
+        DelegatedAadScopes  = ''
+        RequestedMsgRoles   = ''
         ApplicationMsgRoles = ''
-        RequestedMsgScopes = ''
-        DelegatedMsgScopes = ''
-        ActiveAadUsers = ($ActivityLogs | Where-Object { $_.AppId -eq '1b730954-1685-4b74-9bfd-dac224a7b894'}).ActiveUsers
-        TotalAadSignIns = ($ActivityLogs | Where-Object { $_.AppId -eq '1b730954-1685-4b74-9bfd-dac224a7b894'}).TotalSignIns
+        RequestedMsgScopes  = ''
+        DelegatedMsgScopes  = ''
+        ActiveAadUsers      = $ActiveApp.ActiveUsers
+        TotalAadSignIns     = $ActiveApp.TotalSignIns
     }
 }
 
 # Loop through all the applications to find which ones have AAD Graph permissions
 foreach ($sp in $serviceprincipals) {
     $i++
-    Write-Progress -Activity "Getting Service Principal consented permissions..." -Status "$i/$($servicePrincipals.Count) - $($sp.DisplayName)" -percentComplete (($i / $servicePrincipals.Count) * 100) -Id 1 -SecondsRemaining (((Get-Date) - $StartTime).TotalSeconds*($servicePrincipals.Count-$i)/$i)
+    Write-Progress -Activity "Getting Service Principal consented permissions..." -Status "$i/$($servicePrincipals.Count) - $($sp.DisplayName)" -percentComplete (($i / $servicePrincipals.Count) * 100) -Id 1 -SecondsRemaining (((Get-Date) - $StartTime).TotalSeconds * ($servicePrincipals.Count - $i) / $i)
 
     $obj = @{
         DisplayName        = $sp.DisplayName
@@ -195,10 +207,7 @@ foreach ($sp in $serviceprincipals) {
         $obj.RequestedAadScopes = ($ManifestPermissions | Where-Object { $_.ResourceAppId -eq $ApiObjects.AadGraph.AppId -and $_.Type -eq 'Scope' } | Select-Object -ExpandProperty PermissionName -Unique) -join ','
         $obj.RequestedMsgRoles = ($ManifestPermissions | Where-Object { $_.ResourceAppId -eq $ApiObjects.MsGraph.AppId -and $_.Type -eq 'Role' } | Select-Object -ExpandProperty PermissionName -Unique) -join ','
         $obj.RequestedMsgScopes = ($ManifestPermissions | Where-Object { $_.ResourceAppId -eq $ApiObjects.MsGraph.AppId -and $_.Type -eq 'Scope' } | Select-Object -ExpandProperty PermissionName -Unique) -join ','
-        try {
-            $obj.AppProxy = (Get-MgApplication -ApplicationId ($Applications | Where-Object { $_.AppId -eq $sp.AppId }).Id -Property OnPremisesPublishing).OnPremisesPublishing.ExternalUrl
-        }
-        catch { $obj.AppProxy = '' }
+        $obj.AppProxy = (Get-MgApplication -ApplicationId ($Applications | Where-Object { $_.AppId -eq $sp.AppId }).Id -Property Id, AppId, OnPremisesPublishing -ErrorAction SilentlyContinue).OnPremisesPublishing.ExternalUrl 
         Remove-Variable ManifestPermissions -ErrorAction SilentlyContinue
     }
     else {
@@ -266,8 +275,8 @@ foreach ($sp in $serviceprincipals) {
 
     # Add ativity data to the object
     if ($obj.AppId -in $ActivityLogs.AppId) {
-        $obj.ActiveAadUsers = ($ActivityLogs | Where-Object { $_.AppId -eq $obj.AppId}).ActiveUsers
-        $obj.TotalAadSignIns = ($ActivityLogs | Where-Object { $_.AppId -eq $obj.AppId}).TotalSignIns
+        $obj.ActiveAadUsers = ($ActivityLogs | Where-Object { $_.AppId -eq $obj.AppId }).ActiveUsers
+        $obj.TotalAadSignIns = ($ActivityLogs | Where-Object { $_.AppId -eq $obj.AppId }).TotalSignIns
     }
     elseif ($ActivityLogs) {
         $obj.ActiveAadUsers = ''
@@ -275,10 +284,11 @@ foreach ($sp in $serviceprincipals) {
     }
 
     # Add the object to the output array if it has any permissions
-    if ($obj.ApplicationAadRoles -or $obj.DelegatedAadScopes -or $obj.RequestedAadRoles -or $obj.RequestedAadScopes) {
+    if ($obj.ApplicationAadRoles -or $obj.DelegatedAadScopes -or $obj.RequestedAadRoles -or $obj.RequestedAadScopes -or $obj.ActiveAadUsers -or $obj.TotalSignIns) {
         $Output += [PsCustomObject]$obj | Select-Object DisplayName, ServicePrincipalId, AppId, Owner, AppRegistration, AppProxy, `
             RequestedAadRoles, ApplicationAadRoles, RequestedAadScopes, DelegatedAadScopes, `
-            RequestedMsgRoles, ApplicationMsgRoles, RequestedMsgScopes, DelegatedMsgScopes
+            RequestedMsgRoles, ApplicationMsgRoles, RequestedMsgScopes, DelegatedMsgScopes, `
+            ActiveAadUsers, TotalAadSignIns
     }
 }
 
@@ -290,4 +300,7 @@ catch {
     Write-Host "Failed to export file"
 }
 
-$VerbosePreference = $VerboseStashed
+if ($Verbose.IsPresent) {
+    $VerbosePreference = $VerboseStashed
+}
+Write-Host "Finished in $((Get-Date) - $StartTime)"
