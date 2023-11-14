@@ -2,7 +2,7 @@
 
 [CmdletBinding()]
 param (
-    [String]$TenantId = 'pgarm.blue' # Prefill TenantId as GUID of any verified domain name, or supply as parameter
+    [String]$TenantId # Prefill TenantId as GUID of any verified domain name, or supply as parameter
 )
 
 #Helper class for stopwatch used in progress reporting
