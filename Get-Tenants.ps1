@@ -10,12 +10,12 @@ Connect-MgGraph -Scopes CrossTenantInformation.ReadBasic.All -ContextScope Proce
 # Import the list of tenants if a file is specified (no processing if a list is provided)
 switch ($parameterSetName) {
     'byFile' {
-        try {
+        <#try {
             $TenantIds = Import-Csv -Path $Path | Select-Object -ExpandProperty TenantId
         }
-        catch {
+        catch {#>
             $TenantIds = Get-Content -Path $Path
-        }
+        #}
     }
     Default {}
 }
